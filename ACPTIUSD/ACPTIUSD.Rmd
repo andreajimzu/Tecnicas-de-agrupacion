@@ -1,0 +1,467 @@
+---
+title: "Estructura temporal (subyacente) de los tipos de interés."
+author: "Andrea Jiménez Zúñiga"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+```
+
+## Introducción: 
+
+El objetivo del análisis mediante aplicación del ACP a un conjunto de 978 observaciones de los rendimientos de 10 bonos norteamericanos a distintos plazos entre el 2 de enero de 1995 y el 30 de septiembre de 1998. 
+Se trata de verificar si, se puede establecer una estructura subyacente que sintetice y agrupe los distintos plazos en virtud de sus características comunes. A su vez se plantean una serie de cuestiones: En primer lugar determinar si tiene sentido llevar a cabo, un análisis de componentes principales haciendo los análisis correspondientes, por otro lado, el númro de componentes que permitirían explicar la estructura subyacente de los tipos de interés, y por último se quiere saber si tiene sentido hacer una rotación de las variables subyacentes.
+
+
+```{r Libraries and functions, message=FALSE, warning=FALSE}
+library(readr)
+library(factoextra)
+library(FactoMineR)
+library(reshape2)
+library(ggplot2)
+library(Hmisc)
+library(corrplot) 
+library(ppcor)
+library(psych)
+library(rela)
+library(skimr)
+library(stats)
+library(tidyr)
+library(pls)
+library(imputeTS)
+
+```
+
+## Read Data
+
+```{r}
+TIUSD <- read_delim("ACPTIUSD.csv", 
+                          ";", escape_double = FALSE, trim_ws = TRUE)
+attach(TIUSD)
+View(TIUSD)
+
+```
+
+Los elementos con los que nos encontramos son: 
+
+  1. Observaciones activas, que son las que se emplean para el análisis. Se toman las primeras 949                        observaciones.
+  2. Observaciones suplementarias, que son las que se utilizan para predecir. Se toman las observaciones que      van      de 950 a la 978.
+  3. Variables activas: Se toman las 9 primeras variables.
+  4. Variables suplementaria a predecir se toma la IRS 10Y. 
+  
+  
+```{r}
+colnames(TIUSD)
+skim(TIUSD)
+```
+
+```{r}
+head(TIUSD)
+tail(TIUSD)
+```
+
+## Análisis Exploratorio
+
+Cada observación va a tener muy pocos datos por lo que utilizo la librería reshape2.
+Voy a trabajar con los casos completos (complete cases) ya que en este caso hay muchos NAs. Una vez utilizado complete cases, voy a crear una columna con los datos de X1 y transformándolos a formato fecha, y a continuación me quedo con todas las columnas excepto la X1. 
+
+```{r}
+TIUSD2 = TIUSD[complete.cases(TIUSD), ]
+TIUSD2$Fechas = as.Date(TIUSD2$X1, format = "%d/%m/%Y")
+TIUSD2=TIUSD2[,2:12]
+```
+
+A continuación hago un melt de los datos anteriores con el identificadorr fecha. Esto se puede ver a través de un ggplot gracias al melt realizado anteriormente. 
+
+```{r}
+data_long = melt(TIUSD2, id="Fechas")
+ggplot(data=data_long, aes(x= Fechas, y=value,  color=variable)) +
+  
+  geom_point(alpha = 0.3,  position = position_jitter()) +  
+  labs(y = "Tipo", colour="Bono")
+```
+
+Las oscilaciones a corto plazo no se pueden ver, sólo se pueden observar las de largo plazo.
+Posteriormente voy a seleccionar las primeras 949 observaciones (observaciones activas) y las primeras 9 variables (variables activas) sin tener en cuenta la columna fecha.
+
+```{r}
+TIUSD.act=TIUSD[1:949, 1:10]
+head(TIUSD.act)
+str(TIUSD.act)
+Dates=as.Date(TIUSD.act$X1, format = "%d/%m/%y") 
+TIUSD.act=TIUSD.act[,-1]
+head(Dates)
+str(Dates)
+
+```
+Voy a crear a continuación un dataframe con todos los estadísticos al uso con las que ya están y otros que no están como la desviación típica. Esto se hace con el 'apply'.
+
+```{r}
+TIUSD.act_stats = data.frame(
+  Min = apply(TIUSD.act, 2, min, na.rm=TRUE), # mín
+  Q1 = apply(TIUSD.act, 2, quantile, 1/4, na.rm=TRUE), # 1er cuartil
+  Med = apply(TIUSD.act, 2, median, na.rm=TRUE), # mediana
+  Mean = apply(TIUSD.act, 2, mean, na.rm=TRUE), # media
+  SD = apply(TIUSD.act, 2, sd), # Desviación típica
+  Q3 = apply(TIUSD.act, 2, quantile, 3/4, na.rm =TRUE), # 3er cuartil
+  Max = apply(TIUSD.act, 2, max, na.rm=TRUE) # Máx
+)
+TIUSD.act_stats=round(TIUSD.act_stats, 1)
+TIUSD.act_stats
+```
+
+### Análisis matriz de correlación:
+
+Creo una matriz de correlación aplicándole un redondeo (de 2). 
+
+```{r}
+cor.mat = round(cor(TIUSD.act),2)
+cor.mat
+```
+
+Hay problemas con los NA por lo que se utiliza 'complete.obs' de tal forma que va a eliminar la fila completa donde aparezca un NA. 
+
+```{r}
+cor.mat = round(cor(TIUSD.act, use="complete.obs"),2)
+cor.mat
+```
+
+Observando la primera fila se puede llegar a la conclusión de que los plazos cada vez son mayores y  el plazo es creciente. Según crece el plazo, mayor es la correlación, por lo que parece que existe una correlación con el plazo. Puede haber factores subyacentes asociados a los plazos (Bonos de corto plazo, de largo plazo, etc). 
+
+### Niveles de significación y Matriz de correlación: 
+
+En este caso se observa que la correlación no es muy buena, pero no se puede decidir si son independientes, por eso es importante el nivel de clasificación.
+
+Se pueden conocer los niveles de significación con Hmsic. Se crea un dataframe que lo va a tratar como una matriz. Aparece primero la matriz de correlación, seguido del número de observaciones que se han utilizado (n) y por último los niveles de significación de la Hipótesis de independencia (P). 
+
+Para el contraste de hipótesis se calcula un estadístico de contraste que toma como valor lambda 0 (siendo este el empírico, el estadístico de contraste) y se lleva al eje de la x comparando lambda de 0 con lambda de t. Si lambda 0 está por delante de lambda t hay una masa de probabilidad y cuando este tiende a 0 se rechaza la hipótesis, está en región crítica. 
+
+```{r}
+require(Hmisc)
+cor.mat.nds= rcorr(as.matrix(TIUSD.act))
+cor.mat.nds
+```
+
+Para poder visualizar mejor la matriz de correlación voy a graficarla a través de la librería 'corrplot'. Se puede observar que no existen correlaciones negativas entre ninguna de ellas, observándose a su vez que la correlación que existe entre ellas es alta.
+
+```{r}
+require(corrplot)
+corrplot::corrplot(cor.mat, type="lower", order="original",
+         tl.col="black", tl.cex=0.7, tl.srt=45)  # las correlaciones positivas en azul, las negativas en rojo
+
+```
+
+Grafico la matriz de correlación de manera que me permita observar clusters. Voy a probar primero añadiendo 4 factores subyacentes en 'addrect'. 
+
+```{r}
+corrplot::corrplot(cor.mat, type="full", order="hclust", addrect = 4,
+         tl.col="black", tl.cex=0.7, tl.srt=45) 
+```
+
+A continuación, voy a probar 'addrect = 3'. Se puede observar que con 3 factores subyacentes puedo tener una buena explicación de los tipos de interés.
+En este caso el corto plazo es 3 meses, medio plazo 1 año y largo plazo a partir del año. 
+
+```{r}
+corrplot::corrplot(cor.mat, type="full", order="hclust", addrect = 3,
+         tl.col="black", tl.cex=0.7, tl.srt=45) 
+```
+
+Para poder analizarlo de una manera más amplia, se emplea un chart.Correlation con la librería 'PerformanceAnalytics' Se puede observar un chart de correlación donde en la diagonal aparece la distribución de cada variable, a la izquierda los diagramas de dispersión y a la derecha los coeficientes de correlación.
+
+```{r}
+require(PerformanceAnalytics)
+chart.Correlation(TIUSD.act, histogram=TRUE, pch=19)
+```
+
+```{r}
+col = colorRampPalette(c("red", "white", "blue"))(20) #definimos la paleta de colores;
+heatmap(x = cor.mat, col = col, symm = TRUE)
+```
+
+KMO verifica la idoneidad del ACP a partir de la matriz de correlaciones parciales. Para poder calcularla es necesario primero la inversa de la matriz de correlaciones. Una vez obtenida se puede calcular la matriz de correlaciones parciales, que es:  -1 * matriz anti-imagen de spss, sin la diagonal.
+
+```{r}
+invR = solve(cor.mat)
+invR
+```
+
+Aquí calculo la matriz de correlaciones parciales. 
+
+```{r}
+require(ppcor)
+TIUSD.act.C=TIUSD.act[complete.cases(TIUSD.act),] #necesitamos la matriz de obsrvaciones SIN NA's
+p.cor.mat=pcor(TIUSD.act.C) 
+p.cor.mat
+```
+
+### Análisis determinante de matriz de correlaciones:
+
+Cuanto más bajo sea el determinante de mi matriz de correlación mejor para el análisis, ya que indica alta multicolinealidad entre las variables. En este caso es muy cercano a 0 lo cual indica un alto nivel de colinealidad en el conjunto de variables involucradas en la matriz.
+
+```{r}
+det(cor.mat)
+```
+
+### Test de esfericidad de Barlett: 
+
+Contrasta la hipótesis nula de que la matriz de correlaciones es una matriz identidad, en cuyo caso no existirían correlaciones significativas entre las variables y el modelo factorial no sería pertinente.
+Si el p-valor es menor que 0.05 se acepta la hipótesis nula y se tiene que aplicar el análisis factorial. En caso contrario se rechaza la hipótesis y se continúa con el análisis.
+
+```{r}
+cortest.bartlett(TIUSD.act)
+```
+
+Como resultado se obtiene un p.value = 0, por lo cual hay evidendia para rechazar la hipótesis nula y aceptar la hipótesis de que es distinto de 1. 
+
+### Índice KMO de Kaiser-Meyer Olkin: 
+
+Se mide el grado de asociación exclusiva entre las dos variables eliminando la influencia del resto de variables. Cuanto más cerca de 1 esté el valor obtenido del test KMO, mayor va a ser la relación entres las variables.
+
+```{r}
+KMO(TIUSD.act)
+```
+El valor de MSA = 0.87, lo cual indica el sentido que tiene realizar un análisis pca ya que su valor es mayor que 0.5.
+
+## Varianza Explicada y Gráfico de Sedimentación
+
+Voy a utilizar la librería FactoMineR. Los elementos del objeto pca creado van a aparecer en forma de lista.
+
+```{r}
+pca <- PCA(X = TIUSD.act, scale.unit = TRUE, ncp = 64, graph = FALSE)
+print(pca)
+
+```
+```{r}
+head(pca$eig)
+
+```
+
+```{r}
+pca= PCA(TIUSD.act, graph=T) 
+pca$eig # con FacotMineR
+```
+
+### Relación de las variables con los CCPP: 
+
+
+```{r}
+pca$var$coord
+pca$var$cor
+pca$var$cos2
+pca$var$contrib
+```
+
+```{r}
+fviz_pca_var(pca, col.var = "steelblue")
+
+```
+
+```{r}
+fviz_pca_var(pca, col.var="contrib",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), repel=TRUE) +
+                              labs(title="Mapa de ejes principales")+
+        theme_minimal()
+
+fviz_pca_var(pca, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+)
+```
+
+```{r}
+fviz_pca_ind(pca, geom.ind = "point", 
+             col.ind = "#FC4E07", 
+             axes = c(1, 2), 
+             pointsize = 1.5)
+```
+
+Axes  1 y 2 se corresponden con PC1 y PC2. 
+
+
+### Representación de las variables: 
+
+Para ello se puede utilizar la función fviz_pca_var() del paquete factoextra, obteniendo un gráfico de correlación de variables
+
+```{r}
+fviz_pca_var(pca, col.var = "cos2", 
+             geom.var = "arrow", 
+             labelsize = 2, 
+             repel = FALSE)
+```
+
+Este gráfico te muestra el porcentaje de varianza explicada por la primera (dim1), siendo de un 80.5% y por la segunda (dim2), siendo de un 17.9%. 
+
+Para extraer los resultados de las variables a partir de pca se utiliza la función get_pca_var().
+
+```{r}
+var <- get_pca_var(pca)
+var
+```
+
+### Elección de los componentes principales: 
+
+```{r}
+fviz_eig(pca, addlabels=TRUE, hjust = -0.3)+
+        labs(title="Scree plot / Gráfico de sedimentación", x="Dimensiones", y="% Varianza explicada")
+        theme_minimal()
+```
+
+```{r}
+#Top 10 variables que más contribuyen a PC1
+fviz_contrib(pca, choice = "var", axes = 1, top = 10)
+```
+
+La línea roja discontinua indica el valor medio de contribución. Para una determinada componente, una variable con una contribución mayor a este límite puede considerarse importante a la hora de contribuir a esta componente. En la representación anterior, el DEPO 12M es el que más contribuye a la PC1.
+
+
+```{r}
+fviz_contrib(pca, choice="var", axes = 2 )+
+        labs(title = "Contribuciones a la Dim 2")
+
+```
+
+### Realización de los componentes
+
+
+```{r}
+fit <- principal(TIUSD.act, nfactors=2, rotate="varimax")
+fit
+```
+
+
+### Gráfico de Sedimentación: 
+
+```{r}
+scree(TIUSD.act,main ="Grafico_de_Sedimentacion")
+```
+
+El gráfico de Sedimentación nos muestra la cantidad óptima de componentes a tomar en cuenta en la base de datos, siendo los valores que se encuentran por encima de la línea de 1.0 los más aceptables. Según el gráfico de sedimentación, lo óptimo seria realizar 2 componentes, puesto que este valor se encuentra por encima de la línea aceptable de la grafica.
+
+
+```{r}
+fa.parallel(TIUSD.act,fa="pc")
+
+```
+
+Mediante el análisis paralelo se puede observar que el número de componentes debería ser 2. 
+
+
+## Rotación Varimax
+
+Varimax trata de facilita4 la interpretabilidad de los factores.
+Primero he realizado factores sobre mi base de datos y no he realizado ninguna rotación. 
+
+```{r}
+TIUSD.act <- na.omit(TIUSD.act)
+fa <- factanal(TIUSD.act, 2, rotation = 'none')
+fa
+```
+
+A continuación he realizado lo mismo, pero esta vez haciendo rotación de tipo varimax. Se puede observar que los coeficientes de los factores han cambiado. Por otro lado, la varianza explicada acumulada se mantiene igual (97.9%).
+
+La varianza explicada por el primer factor, 80.4% ha descendido al 65.9%, por lo que ya no se orientan en las direcciones de máxima variación. 
+
+Con este análisis se puede concluir que puede hacerse rotación varimax ya que no varía el porcentaje que se explica de varianza de factores tanto rotados como no rotados, sin embargo, puede desvirtuar la elección del número de factores.
+
+```{r}
+varimax(loadings(fa), normalize = FALSE)
+```
+
+## Predicción
+
+```{r}
+TIUSD <- na_mean(TIUSD)
+training <- TIUSD[1:949, 2:11 ]
+test     <- TIUSD[950:978, 2:11]
+```
+
+Primero voy a ajustar el modelo incluyendo todas las longitudes de onda con los predictores. 
+
+```{r}
+modelo <- lm(formula = `IRS 10Y` ~ ., data = training)
+summary(modelo)
+```
+
+El valor r ajustado obtenido es muy alto, siendo de un 99.9%, lo cual indica que el modelo es capaz de predecir con gran exactitud el contenido de las observaciones con las que se ha entrenado. El p-value es < 2.2e-16, lo cual muestra que el modelo en su conjunto es significativo, pero muy pocos de los predictores lo son a nivel individual, lo cual nos muestra que puede haber colinealidad. 
+
+Se utiliza el Mean Square Error para saber cómo de bueno es el modelo prediciendo nuevas observaciones que no han participado en el ajuste. 
+
+```{r}
+#Voy a emplear observaciones de entrenamiento 
+training_mse <- mean((modelo$fitted.values - training$`IRS 10Y`)^2)
+training_mse
+```
+
+Tiene un MSE muy bajo, de 0.32. Para poder analizarlo mejor voy a calcular el MSE del modelo cuando se emplean nuevas observaciones. 
+
+```{r}
+# MSE empleando nuevas observaciones
+predicciones <- predict(modelo, newdata = test)
+test_mse <- mean((predicciones - test$`IRS 10Y`)^2)
+test_mse
+```
+
+
+
+```{r}
+set.seed(123)
+modelo_pcr <- pcr(formula = `IRS 10Y` ~ ., data = training, scale. = TRUE, validation = "CV")
+modelo_pcr_CV <- MSEP(modelo_pcr, estimate = "CV")
+which.min(modelo_pcr_CV$val)
+```
+
+
+```{r}
+# Test-MSE
+predicciones <- predict(modelo_pcr, newdata = test, ncomp = 8)
+test_mse <- mean((predicciones - test$`IRS 10Y`)^2)
+test_mse
+```
+
+El número óptimo de componentes principales identificado por CV es de 8. Empleándolo en la PCR se consigue reducir el test-MSE a 0.00023, un valor muy por debajo del conseguido con los otros modelos. 
+
+## Conclusiones
+
+Con lo análisis que se han llevado a cabo se puede responder a las cuestiones definidad en la introducción. 
+Fijándonos en la matriz de correlación se puede observar que hay una alta correlación entre las variables, sin embargo no es razón suficiente para determinar si es necesario o no hacer un análisis de componentes principales, por lo que para ello se ha seguido con la prueba de esfericidad de Barlett con la cual se rechaza la hipótesis nula de que la matriz de correlaciones es una matriz identidad. A su vez, se ha realizado un test KMO el cual nos muestra que el MSA es de 0.87, indicando el sentido que tiene hacer el análisis PCA. 
+
+Por otro lado, la gráfica de sedimentación muestra que el número óptimo de componentes que permiten explicar adecuadamente la estructura subycente de los tipos de interés  analizados es de dos, ya que este valor se encuentra por encima de la línea aceptable de la grafica.
+
+Por último, se ha llevado a cabo un análisis Varimax el cual nos indica que se hacer rotación varimax ya que no varía el porcentaje que se explica de varianza de factores tanto rotados como no rotados, sin embargo, puede desvirtuar la elección del número de factores.
+
+Realizando la predicción de la variable suplementaria se muestra que el modelo en su conjunto es significativo, pero muy pocos de los predictores lo son a nivel individual, lo cual nos muestra que puede haber colinealidad. Empleando el número óptimo de componentes principalesen la PCR se consigue reducir el test-MSE pero a un valor muy por debajo del conseguido con los otros modelos.
+
+
+## Anexo 
+
+Enlace a mi github con el rmarkdown de la práctica incluído en la carpeta 'ACPTIUSD' en el repositorio 'Tecnicas-de-agrupacion'. 
+
+https://github.com/andreajimzu/Tecnicas-de-agrupacion.git
+
+
+## Bibliografía
+
+Bellosta, G. C. J. (2014, 2 abril). Varimax: lo que se gana, lo que se pierde – datanalytics. Data Analytics. https://www.datanalytics.com/2014/04/02/varimax-lo-que-se-gana-lo-que-se-pierde/
+
+Rodrigo, J. A. (s. f.-a). Análisis de Componentes Principales (Principal Component Analysis, PCA) y t-SNE. Ciencia de Datos. https://www.cienciadedatos.net/documentos/35_principal_component_analysis#Ejemplo_c%C3%A1lculo_directo_de_PCA_con_R
+
+Rodrigo, J. A. (s. f.-b). Análisis de Componentes Principales (Principal Component Analysis, PCA) y t-SNE. Ciencia de datos. https://www.cienciadedatos.net/documentos/35_principal_component_analysis#PLS:_PCA_aplicado_a_regresi%C3%B3n_lineal
+
+RPubs - AnÃ¡lisis de componentes principales (ACP). (2019). RPubs. https://rpubs.com/Csanchez15/551258
+
+ACP_practica1
+
+Práctica empezada en clase de TIUSD. 
+
+
+
+
+
+
